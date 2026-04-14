@@ -1,35 +1,32 @@
 
-
 services:
 
-  # RabbitMQ — the message queue
   rabbitmq:
-    image: rabbitmq:3-management    # management = includes the web dashboard
+    image: rabbitmq:3-management
     container_name: harvest-rabbitmq
     ports:
-      - "5672:5672"       # apps connect here to send/receive messages
-      - "15672:15672"     # web dashboard — open in browser to see queues
+      - "5672:5672"
+      - "15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: nexus
       RABBITMQ_DEFAULT_PASS: nexuspass
     volumes:
-      - rabbitmq_data:/var/lib/rabbitmq   # keeps data if container restarts
+      - rabbitmq_data:/var/lib/rabbitmq
     restart: unless-stopped
 
-  # Your FastAPI ingestion API
   api:
-    build: ./api                    # build using the Dockerfile in the api folder
+    build: ./api
     container_name: harvest-api
     ports:
       - "8000:8000"
     environment:
-      RABBITMQ_HOST: rabbitmq       # matches the service name above
+      RABBITMQ_HOST: rabbitmq
       RABBITMQ_USER: nexus
       RABBITMQ_PASS: nexuspass
     volumes:
-      - ./api:/app                  # live link — code changes reflect instantly
+      - ./api:/app
     depends_on:
-      - rabbitmq                    # don't start until RabbitMQ is up
+      - rabbitmq
     restart: unless-stopped
 
 volumes:
