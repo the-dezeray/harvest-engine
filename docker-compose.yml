@@ -14,6 +14,13 @@ services:
       - rabbitmq_data:/var/lib/rabbitmq
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    container_name: harvest-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
   api:
     build: ./api
     container_name: harvest-api
@@ -23,10 +30,26 @@ services:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USER: nexus
       RABBITMQ_PASS: nexuspass
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     volumes:
       - ./api:/app
     depends_on:
       - rabbitmq
+      - redis
+    restart: unless-stopped
+
+  worker:
+    build: ./worker
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: nexus
+      RABBITMQ_PASS: nexuspass
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      - rabbitmq
+      - redis
     restart: unless-stopped
 
 volumes:
