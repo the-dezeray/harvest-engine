@@ -1,31 +1,18 @@
-"""
-campus network emitter
-simulates 40 biust wifi access points sending data to the ingestion api.
-
-uses real cesnet network traffic data if available.
-falls back to random data if the dataset hasnt been downloaded yet.
-
-run with: python emitter.py
-"""
-
 import asyncio
 import httpx
 import random
 import time
 import os
 import glob
+import pandas as pd
 
-# where to send data
-API_URL = "http://localhost:8000/ingest"
-SCENARIO_URL = "http://localhost:8000/scenario"
+# configuration
+API_URL = os.getenv("API_URL", "http://localhost:8000/ingest")
+SCENARIO_URL = os.getenv("SCENARIO_URL", "http://localhost:8000/scenario")
+SEND_INTERVAL = float(os.getenv("SEND_INTERVAL", "2.0"))
+DATA_FOLDER = os.getenv("DATA_FOLDER", "institution_subnets/agg_1_day")
 
-# how often each AP sends a reading (seconds)
-SEND_INTERVAL = 2
-
-# cesnet dataset location
-DATA_FOLDER = "./data/ip_addresses_sample/agg_10_minutes"
-
-# access points that are busier than normal (2x load)
+# access points that are busier than normal
 HOTSPOTS = {"LIB-AP-01", "SRC-AP-01", "SRC-AP-02"}
 
 # all campus buildings and their access points
@@ -44,183 +31,112 @@ BUILDINGS = {
 
 ALL_APS = [ap for aps in BUILDINGS.values() for ap in aps]
 
-
-def load_cesnet_data():
-    """
-    loads real network traffic from cesnet dataset.
-    each csv file = one ip address with 40 weeks of traffic data.
-    we normalize the byte counts to a 1-150 device range.
-    returns a dict of ap_id -> list of load values, or empty dict if no data.
-    """
+def load_replay_data():
+    """loads 30% of the cesnet training data for replay."""
     csv_files = glob.glob(os.path.join(DATA_FOLDER, "*.csv"))
+    csv_files.sort()
 
     if not csv_files:
-        print("no cesnet data found - using random mode")
-        print(f"download data to: {DATA_FOLDER}")
+        print(f"[warning] no data in {DATA_FOLDER} - using random mode")
         return {}
 
-    try:
-        import pandas as pd
-        import numpy as np
-    except ImportError:
-        print("pandas not installed - run: pip install pandas numpy")
-        return {}
+    # use 30% subset as requested
+    n_replay = max(1, int(len(csv_files) * 0.30))
+    replay_files = csv_files[:n_replay]
+    print(f"[emitter] replaying {len(replay_files)} files (30% of training set)")
 
-    print(f"loading cesnet data from {len(csv_files)} files...")
     profiles = {}
-
     for i, ap_id in enumerate(ALL_APS):
-        if i >= len(csv_files):
-            break  # more APs than files, rest will use random
-
+        path = replay_files[i % len(replay_files)]
         try:
-            df = pd.read_csv(csv_files[i])
-
-            # use n_bytes column as the traffic signal
-            if "n_bytes" in df.columns:
-                values = df["n_bytes"].fillna(0).values.astype(float)
-            else:
-                # fallback to first numeric column
-                values = df.select_dtypes(include=[float, int]).iloc[:, 0].fillna(0).values
-
-            # normalize to 1-150 range so it fits our connected_devices field
-            v_min, v_max = values.min(), values.max()
-            if v_max > v_min:
-                normalized = (values - v_min) / (v_max - v_min)
-                scaled = (normalized * 149 + 1).astype(int).tolist()
-            else:
-                scaled = [20] * len(values)  # flat if no variation
-
-            profiles[ap_id] = scaled
-
+            df = pd.read_csv(path)
+            # scale large cesnet metrics to realistic AP values
+            devices = (df["n_flows"].fillna(0) / 50000).clip(1, 200).astype(int).tolist()
+            bandwidth = (df["n_bytes"].fillna(0) / 1e9).round(2).tolist()
+            profiles[ap_id] = {"devices": devices, "bandwidth": bandwidth}
         except Exception as e:
-            print(f"could not load {csv_files[i]}: {e}")
-
-    print(f"loaded {len(profiles)} cesnet profiles")
+            print(f"[error] loading {path}: {e}")
     return profiles
 
-
 class AccessPoint:
-    """
-    represents one campus wifi access point.
-    generates readings based on current scenario mode.
-    """
-
-    def __init__(self, ap_id, cesnet_profile=None):
+    def __init__(self, ap_id, profile=None):
         self.ap_id = ap_id
         self.building = ap_id.split("-")[0]
         self.multiplier = 2 if ap_id in HOTSPOTS else 1
         self.alive = True
-
-        # cesnet replay
-        self.profile = cesnet_profile or []
+        self.profile = profile
         self.index = 0
+        self.load = random.randint(10, 30)
 
-        # random mode - drifting base load
-        self.load = random.randint(10, 30) * self.multiplier
-
-    def next_load(self):
-        """gets next load value from cesnet or random"""
+    def next_metrics(self):
         if self.profile:
-            val = self.profile[self.index % len(self.profile)]
+            idx = self.index % len(self.profile["devices"])
+            d = self.profile["devices"][idx]
+            b = self.profile["bandwidth"][idx]
             self.index += 1
-            return int(val * self.multiplier)
+            return int(d * self.multiplier), round(b * self.multiplier, 2)
         else:
-            self.load += random.randint(-2, 2)
-            self.load = max(1, min(100, self.load))
-            return int(self.load * self.multiplier)
+            self.load = max(1, min(100, self.load + random.randint(-2, 2)))
+            return int(self.load * self.multiplier), round(self.load * 0.5, 2)
 
     def generate(self, mode):
-        """returns a reading dict, or None if AP is offline"""
-        if not self.alive:
-            return None
-
-        # in failure mode, randomly kill this AP
-        if mode == "failure" and random.random() < 0.3:
+        if not self.alive: return None
+        if mode == "failure" and random.random() < 0.2:
             self.alive = False
-            print(f"{self.ap_id} went offline")
             return None
 
-        base = self.next_load()
+        base_devices, base_bw = self.next_metrics()
 
-        # apply mode on top of base load
         if mode == "spike":
-            base = min(150 * self.multiplier, int(base * 1.8) + random.randint(10, 30))
-            packet_loss = round(random.uniform(5, 20), 2)
+            base_devices = int(base_devices * 2.5)
+            base_bw = round(base_bw * 3.0, 2)
+            loss = round(random.uniform(5, 15), 2)
         elif mode == "cooldown":
-            base = max(1, int(base * 0.5))
-            packet_loss = round(random.uniform(0, 2), 2)
+            base_devices = max(1, int(base_devices * 0.3))
+            base_bw = round(base_bw * 0.3, 2)
+            loss = 0.0
         else:
-            packet_loss = round(random.uniform(0, 3), 2)
+            loss = round(random.uniform(0, 1.5), 2)
 
         return {
             "ap_id": self.ap_id,
             "timestamp": time.time(),
-            "connected_devices": base,
-            "bandwidth_mbps": round(base * random.uniform(0.4, 0.9), 2),
-            "signal_strength_dbm": random.randint(-80, -30),
-            "packet_loss_pct": packet_loss,
+            "connected_devices": base_devices,
+            "bandwidth_mbps": base_bw,
+            "signal_strength_dbm": random.randint(-75, -40),
+            "packet_loss_pct": loss,
             "building": self.building
         }
 
     def revive(self):
-        """brings AP back online after failure mode"""
         self.alive = True
-        self.load = random.randint(10, 30) * self.multiplier
-        print(f"{self.ap_id} back online")
-
 
 async def run_ap(ap, client):
-    """
-    runs forever for one access point.
-    every 2 seconds: check scenario, generate reading, post to api.
-    """
     mode = "normal"
-
     while True:
-        # check current scenario
         try:
             res = await client.get(SCENARIO_URL, timeout=3)
             new_mode = res.json().get("mode", "normal")
-
-            # revive APs when switching back to normal
             if new_mode == "normal" and mode == "failure" and not ap.alive:
                 ap.revive()
-
             mode = new_mode
-        except Exception:
-            pass  # keep last known mode if api is unreachable
+        except Exception: pass
 
-        # generate and send reading
         reading = ap.generate(mode)
         if reading:
             try:
                 await client.post(API_URL, json=reading, timeout=5)
-                print(f"{ap.ap_id} | {reading['connected_devices']} devices | {mode}")
-            except Exception as e:
-                print(f"{ap.ap_id} failed: {e}")
-        else:
-            print(f"{ap.ap_id} is offline")
-
+            except Exception: pass
         await asyncio.sleep(SEND_INTERVAL)
 
-
 async def main():
-    # load cesnet data
-    cesnet = load_cesnet_data()
-
-    # create all access points
-    aps = [AccessPoint(ap_id, cesnet.get(ap_id)) for ap_id in ALL_APS]
-
-    mode = "cesnet replay" if cesnet else "random"
-    print(f"\nstarting {len(aps)} access point emitters ({mode})")
-    print(f"sending to {API_URL}\n")
-
-    # run all APs at the same time
+    profiles = load_replay_data()
+    aps = [AccessPoint(ap_id, profiles.get(ap_id)) for ap_id in ALL_APS]
+    print(f"\n[emitter] starting {len(aps)} APs (replay: {bool(profiles)})")
+    
     async with httpx.AsyncClient() as client:
         tasks = [run_ap(ap, client) for ap in aps]
         await asyncio.gather(*tasks)
-
 
 if __name__ == "__main__":
     asyncio.run(main())

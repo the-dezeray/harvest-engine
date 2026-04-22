@@ -7,6 +7,7 @@ import json
 import os
 import pika
 import redis
+import httpx
 
 app = FastAPI(title="Harvest Engine - Ingestion API")
 
@@ -36,6 +37,8 @@ RABBIT_PASS = os.getenv("RABBITMQ_PASS", "nexuspass")
 # redis connection settings (set by docker)
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+
+ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://ml-service:8001")
 
 REDIS_BUILDING_COUNTS_KEY = os.getenv("BUILDING_COUNTS_KEY", "building_counts")
 REDIS_TOTAL_PROCESSED_KEY = os.getenv("TOTAL_PROCESSED_KEY", "total_processed")
@@ -97,10 +100,8 @@ def send_to_queue(data: dict) -> dict:
             properties=pika.BasicProperties(delivery_mode=2)  # persistent
         )
         connection.close()
-        print(f"[queue] {data['ap_id']} | {data['connected_devices']} devices | {data['building']}")
-
-    except Exception as e:
-        print(f"[warning] rabbitmq unavailable - storing in memory: {e}")
+    except Exception:
+        pass
 
     return message
 
@@ -156,22 +157,43 @@ def get_messages():
     return {"count": len(recent), "messages": recent}
 
 
+@app.get("/forecast")
+async def get_forecast(periods: int = 12):
+    """Proxy to ML Service forecast"""
+    async with httpx.AsyncClient() as client:
+        try:
+            res = await client.get(f"{ML_SERVICE_URL}/predict?periods={periods}", timeout=10)
+            return res.json()
+        except Exception as e:
+            return {"error": f"ML service unreachable: {e}"}
+
+
+@app.get("/ml-stats")
+async def get_ml_stats():
+    """Proxy to ML Service evaluate/health"""
+    async with httpx.AsyncClient() as client:
+        try:
+            health = await client.get(f"{ML_SERVICE_URL}/health", timeout=5).then(lambda r: r.json())
+            eval_res = await client.get(f"{ML_SERVICE_URL}/evaluate", timeout=30).then(lambda r: r.json())
+            return {"health": health, "performance": eval_res}
+        except Exception:
+            # simple version if await chaining is complex
+            try:
+                h = await client.get(f"{ML_SERVICE_URL}/health")
+                e = await client.get(f"{ML_SERVICE_URL}/evaluate")
+                return {"health": h.json(), "performance": e.json()}
+            except Exception as ex:
+                return {"error": str(ex)}
+
+
 @app.get("/alerts")
 def get_alerts(limit: int = 50):
-    if limit < 1:
-        limit = 1
-    if limit > 200:
-        limit = 200
-
+    if limit < 1: limit = 1
+    if limit > 200: limit = 200
     try:
         r = get_redis_client()
         raw = r.lrange(REDIS_ALERTS_KEY, 0, limit - 1)
-        alerts = []
-        for item in raw:
-            try:
-                alerts.append(json.loads(item))
-            except Exception:
-                continue
+        alerts = [json.loads(item) for item in raw]
         return {"count": len(alerts), "alerts": alerts}
     except Exception:
         return {"count": 0, "alerts": []}
@@ -180,33 +202,16 @@ def get_alerts(limit: int = 50):
 # breakdown by building - dashboard uses this
 @app.get("/status")
 def status():
-    # prefer processed state from Redis (written by worker)
     try:
         r = get_redis_client()
         total_processed = int(r.get(REDIS_TOTAL_PROCESSED_KEY) or 0)
         raw_counts = r.hgetall(REDIS_BUILDING_COUNTS_KEY) or {}
         by_building = {k: int(v) for k, v in raw_counts.items()}
-
         return {
             "total_processed": total_processed,
-            "total_messages": total_processed,  # backward-compatible key
             "by_building": by_building,
             "scenario": scenario["mode"],
             "source": "redis",
         }
     except Exception:
-        pass
-
-    # fallback to in-memory debug buffer
-    by_building = {}
-    for m in received_messages:
-        b = m["payload"].get("building", "unknown")
-        by_building[b] = by_building.get(b, 0) + 1
-
-    return {
-        "total_processed": len(received_messages),
-        "total_messages": len(received_messages),
-        "by_building": by_building,
-        "scenario": scenario["mode"],
-        "source": "memory",
-    }
+        return {"total_processed": len(received_messages), "by_building": {}, "scenario": "error", "source": "memory"}

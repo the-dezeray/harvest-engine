@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  Area,
+  AreaChart,
   Bar,
   BarChart,
   Line,
@@ -14,10 +16,9 @@ import {
 
 type StatusResponse = {
   total_processed?: number;
-  total_messages?: number;
   by_building?: Record<string, number>;
   scenario?: string;
-  source?: "redis" | "memory" | string;
+  source?: string;
 };
 
 type AlertEvent = {
@@ -28,281 +29,197 @@ type AlertEvent = {
   building?: string;
   timestamp?: number;
   message?: string;
-  value?: number;
+};
+
+type ForecastPoint = {
+  ds: string;
+  yhat: number;
+  yhat_lower: number;
+  yhat_upper: number;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
-const throughputData = [
-  { t: "0s", value: 800 },
-  { t: "10s", value: 950 },
-  { t: "20s", value: 870 },
-  { t: "30s", value: 1100 },
-  { t: "40s", value: 1284 },
-  { t: "50s", value: 1400 },
-  { t: "60s", value: 1350 },
-];
-
-const cpuData = [
-  { name: "worker-01", cpu: 45 },
-  { name: "worker-02", cpu: 58 },
-  { name: "worker-03", cpu: 82 },
-  { name: "worker-04", cpu: 12 },
-];
-
-const nodes = [
-  { name: "worker-01", status: "active" },
-  { name: "worker-02", status: "active" },
-  { name: "worker-03", status: "high load" },
-  { name: "worker-04", status: "idle" },
-] as const;
-
-const statusColor: Record<(typeof nodes)[number]["status"], string> = {
-  active: "bg-green-100 text-green-800",
-  "high load": "bg-yellow-100 text-yellow-800",
-  idle: "bg-gray-100 text-gray-500",
-};
-
-function num(n: unknown): number {
-  if (typeof n === "number" && Number.isFinite(n)) return n;
-  if (typeof n === "string") {
-    const v = Number(n);
-    if (Number.isFinite(v)) return v;
-  }
-  return 0;
-}
-
 export default function Dashboard() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const [forecast, setForecast] = useState<ForecastPoint[]>([]);
+  const [mlStats, setMlStats] = useState<any>(null);
+  const [history, setHistory] = useState<{t: string, val: number}[]>([]);
   const [scenarioBusy, setScenarioBusy] = useState(false);
 
-  const byBuildingEntries = useMemo(() => {
-    const entries = Object.entries(status?.by_building ?? {});
-    entries.sort((a, b) => b[1] - a[1]);
-    return entries;
-  }, [status?.by_building]);
+  const totalProcessed = status?.total_processed ?? 0;
+  const hasAnomaly = alerts.some(a => a.type === "PREDICTED_ANOMALY");
 
-  const scenario = status?.scenario ?? "unknown";
-  const totalProcessed = num(status?.total_processed ?? status?.total_messages);
-
+  // Fetch status and track history for the chart
   useEffect(() => {
-    let cancelled = false;
-
-    const fetchStatus = async () => {
+    let lastTotal = 0;
+    const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API_BASE}/status`, { cache: "no-store" });
-        if (!res.ok) return;
-        const data = (await res.json()) as StatusResponse;
-        if (!cancelled) setStatus(data);
-      } catch {
-        // ignore
-      }
-    };
-
-    fetchStatus();
-    const id = window.setInterval(fetchStatus, 1500);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
+        const res = await fetch(`${API_BASE}/status`);
+        const data = await res.json();
+        setStatus(data);
+        
+        if (lastTotal > 0) {
+          const rate = (data.total_processed - lastTotal) / 2; // per second
+          setHistory(prev => [...prev.slice(-29), { t: new Date().toLocaleTimeString(), val: rate }]);
+        }
+        lastTotal = data.total_processed;
+      } catch (e) {}
+    }, 2000);
+    return () => clearInterval(interval);
   }, []);
 
+  // Fetch Alerts
   useEffect(() => {
-    let cancelled = false;
-
-    const fetchAlerts = async () => {
+    const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API_BASE}/alerts?limit=50`, { cache: "no-store" });
-        if (!res.ok) return;
-        const data = (await res.json()) as { alerts?: AlertEvent[] };
-        if (!cancelled) setAlerts(Array.isArray(data.alerts) ? data.alerts : []);
-      } catch {
-        // ignore
-      }
-    };
-
-    fetchAlerts();
-    const id = window.setInterval(fetchAlerts, 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
+        const res = await fetch(`${API_BASE}/alerts?limit=10`);
+        const data = await res.json();
+        setAlerts(data.alerts || []);
+      } catch (e) {}
+    }, 3000);
+    return () => clearInterval(interval);
   }, []);
 
-  const setScenario = async (mode: "normal" | "spike" | "cooldown" | "failure") => {
-    try {
-      setScenarioBusy(true);
-      await fetch(`${API_BASE}/scenario?mode=${mode}`, { method: "POST" });
-    } finally {
-      setScenarioBusy(false);
-    }
+  // Fetch ML Forecast and Stats
+  useEffect(() => {
+    const fetchML = async () => {
+      try {
+        const [fRes, sRes] = await Promise.all([
+          fetch(`${API_BASE}/forecast?periods=12`),
+          fetch(`${API_BASE}/ml-stats`)
+        ]);
+        const fData = await fRes.json();
+        const sData = await sRes.json();
+        setForecast(fData.forecast || []);
+        setMlStats(sData);
+      } catch (e) {}
+    };
+    fetchML();
+    const interval = setInterval(fetchML, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const chartData = useMemo(() => {
+    return history.map((h, i) => ({
+      name: h.t,
+      live: h.val,
+      // map forecast to same timescale (very rough normalization)
+      predicted: forecast[0] ? forecast[0].yhat / 86400 : null,
+      upper: forecast[0] ? forecast[0].yhat_upper / 86400 : null,
+      lower: forecast[0] ? forecast[0].yhat_lower / 86400 : null,
+    }));
+  }, [history, forecast]);
+
+  const setScenario = async (mode: string) => {
+    setScenarioBusy(true);
+    await fetch(`${API_BASE}/scenario?mode=${mode}`, { method: "POST" });
+    setScenarioBusy(false);
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Top bar */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center">
-        <div className="flex items-center gap-2 font-medium text-gray-800">
-          <div className="w-2.5 h-2.5 rounded-full bg-green-500"></div>
-          AdNe Dashboard
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
+      {/* Header */}
+      <header className="bg-white border-b px-8 py-4 flex justify-between items-center sticky top-0 z-10">
+        <div className="flex items-center gap-3">
+          <div className={`w-3 h-3 rounded-full animate-pulse ${hasAnomaly ? 'bg-red-500' : 'bg-emerald-500'}`}></div>
+          <h1 className="text-lg font-bold tracking-tight">HARVEST ENGINE <span className="text-slate-400 font-normal">| Orchestrator</span></h1>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs bg-gray-100 text-gray-700 px-3 py-1 rounded-full">
-            scenario: {scenario}
-          </span>
-          <span className="text-xs bg-green-50 text-green-700 px-3 py-1 rounded-full">
-            processed: {totalProcessed.toLocaleString()}
-          </span>
-        </div>
-      </div>
-
-      <div className="p-6 space-y-6">
-        {/* Scenario controls */}
-        <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-sm font-medium text-gray-800">Scenario controls</p>
-            <p className="text-xs text-gray-500">Switch emitter mode (API: /scenario)</p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {([
-              { mode: "normal", label: "Normal" },
-              { mode: "spike", label: "Spike" },
-              { mode: "cooldown", label: "Cooldown" },
-              { mode: "failure", label: "Failure" },
-            ] as const).map((b) => (
-              <button
-                key={b.mode}
-                className="text-sm px-3 py-1.5 rounded-md border border-gray-200 bg-gray-50 hover:bg-gray-100 disabled:opacity-50"
-                onClick={() => setScenario(b.mode)}
-                disabled={scenarioBusy}
-              >
-                {b.label}
-              </button>
-            ))}
+        <div className="flex gap-4 items-center">
+          {hasAnomaly && <span className="bg-red-100 text-red-700 px-3 py-1 rounded text-xs font-bold animate-bounce">ANOMALY DETECTED</span>}
+          <div className="text-right">
+            <p className="text-[10px] uppercase text-slate-400 font-bold leading-none">Scenario</p>
+            <p className="text-sm font-bold text-slate-700">{status?.scenario || '...'}</p>
           </div>
         </div>
+      </header>
 
-        {/* Metric cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {[
-            {
-              label: "Total processed",
-              value: totalProcessed.toLocaleString(),
-              delta: status?.source ? `source: ${status.source}` : "",
-            },
-            {
-              label: "Buildings seen",
-              value: Object.keys(status?.by_building ?? {}).length.toString(),
-              delta: "from processed stream",
-            },
-            {
-              label: "Recent alerts",
-              value: alerts.length.toString(),
-              delta: "last 50 events",
-            },
-            {
-              label: "API base",
-              value: API_BASE.replace("http://", "").replace("https://", ""),
-              delta: "NEXT_PUBLIC_API_BASE",
-            },
-          ].map((m) => (
-            <div key={m.label} className="bg-gray-100 rounded-lg p-4">
-              <p className="text-xs text-gray-500 mb-1">{m.label}</p>
-              <p className="text-2xl font-medium text-gray-900 truncate">{m.value}</p>
-              <p className="text-xs mt-1 text-gray-600 truncate">{m.delta}</p>
+      <main className="p-8 space-y-8 max-w-7xl mx-auto">
+        {/* ML Performance & Controls */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 bg-white p-6 rounded-2xl border shadow-sm">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="font-bold text-slate-700">Predictive Orchestration</h2>
+              <div className="flex gap-2">
+                {['normal', 'spike', 'cooldown', 'failure'].map(m => (
+                  <button 
+                    key={m}
+                    disabled={scenarioBusy}
+                    onClick={() => setScenario(m)}
+                    className="px-3 py-1 text-xs font-bold uppercase rounded border hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </div>
+            
+            <div className="h-[240px] w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={chartData}>
+                  <defs>
+                    <linearGradient id="colorLive" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.1}/>
+                      <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                    </linearGradient>
+                  </defs>
+                  <XAxis dataKey="name" hide />
+                  <YAxis fontSize={10} axisLine={false} tickLine={false} />
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} />
+                  <Area type="monotone" dataKey="upper" stroke="transparent" fill="#f1f5f9" />
+                  <Area type="monotone" dataKey="lower" stroke="transparent" fill="#fff" />
+                  <Line type="monotone" dataKey="predicted" stroke="#94a3b8" strokeDasharray="5 5" dot={false} strokeWidth={2} />
+                  <Area type="monotone" dataKey="live" stroke="#10b981" fillOpacity={1} fill="url(#colorLive)" strokeWidth={3} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+            <p className="text-[10px] text-slate-400 mt-4 text-center">Live Throughput vs Prophet Prophet Predicted Range (Gray Band)</p>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl">
+              <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Model Accuracy</p>
+              <h3 className="text-4xl font-black mb-4">
+                {mlStats?.performance?.accuracy_percent || '00.0'}%
+              </h3>
+              <div className="space-y-2">
+                <div className="flex justify-between text-xs">
+                  <span className="text-slate-400">MAE</span>
+                  <span className="font-mono">{mlStats?.performance?.MAE || '0.00'}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-slate-400">Target</span>
+                  <span className="font-mono">{mlStats?.health?.meta?.target_col || 'n_flows'}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white p-6 rounded-2xl border shadow-sm">
+              <h2 className="font-bold text-slate-700 mb-4 text-sm uppercase">Recent Alerts</h2>
+              <div className="space-y-3">
+                {alerts.map(a => (
+                  <div key={a.id} className={`p-3 rounded-lg border-l-4 ${a.type === 'PREDICTED_ANOMALY' ? 'bg-red-50 border-red-500' : 'bg-slate-50 border-slate-300'}`}>
+                    <p className="text-[10px] font-bold uppercase opacity-50">{a.type}</p>
+                    <p className="text-xs font-medium mt-1 leading-tight">{a.message}</p>
+                  </div>
+                ))}
+                {alerts.length === 0 && <p className="text-xs text-slate-400">System operating within bounds.</p>}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Building Grid */}
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+          {Object.entries(status?.by_building || {}).map(([name, count]) => (
+            <div key={name} className="bg-white p-4 rounded-xl border shadow-sm">
+              <p className="text-[10px] font-bold text-slate-400 uppercase">{name}</p>
+              <p className="text-xl font-black text-slate-700">{count.toLocaleString()}</p>
             </div>
           ))}
         </div>
-
-        {/* Throughput chart + Node list */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="md:col-span-2 bg-white border border-gray-200 rounded-xl p-4">
-            <p className="text-sm font-medium text-gray-800 mb-4">Data throughput — sample chart</p>
-            <ResponsiveContainer width="100%" height={160}>
-              <LineChart data={throughputData}>
-                <XAxis dataKey="t" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Line type="monotone" dataKey="value" stroke="#1D9E75" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-
-          <div className="bg-white border border-gray-200 rounded-xl p-4">
-            <p className="text-sm font-medium text-gray-800 mb-4">Worker nodes (demo)</p>
-            {nodes.map((n) => (
-              <div
-                key={n.name}
-                className="flex justify-between items-center py-2 border-b border-gray-100 last:border-0"
-              >
-                <span className="text-sm text-gray-700">{n.name}</span>
-                <span className={`text-xs px-2 py-0.5 rounded-full ${statusColor[n.status]}`}>
-                  {n.status}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Building breakdown + Alerts */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="bg-white border border-gray-200 rounded-xl p-4">
-            <p className="text-sm font-medium text-gray-800 mb-4">Messages by building</p>
-            {byBuildingEntries.length === 0 ? (
-              <p className="text-sm text-gray-500">No processed data yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {byBuildingEntries.map(([b, count]) => (
-                  <div key={b} className="flex items-center justify-between">
-                    <span className="text-sm text-gray-700">{b}</span>
-                    <span className="text-sm font-medium text-gray-900">{count.toLocaleString()}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="bg-white border border-gray-200 rounded-xl p-4">
-            <p className="text-sm font-medium text-gray-800 mb-4">Recent alerts</p>
-            {alerts.length === 0 ? (
-              <p className="text-sm text-gray-500">No alerts yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {alerts.slice(0, 12).map((a) => (
-                  <div key={a.id ?? `${a.type}-${a.timestamp}`} className="border border-gray-100 rounded-lg p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full">
-                        {a.type ?? "event"}
-                      </span>
-                      <span className="text-xs text-gray-500">{a.severity ?? ""}</span>
-                    </div>
-                    <p className="text-sm text-gray-800 mt-2">{a.message ?? ""}</p>
-                    <p className="text-xs text-gray-500 mt-1">
-                      {a.ap_id ? `AP: ${a.ap_id}` : ""}
-                      {a.building ? ` • Building: ${a.building}` : ""}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* CPU bar chart */}
-        <div className="bg-white border border-gray-200 rounded-xl p-4">
-          <p className="text-sm font-medium text-gray-800 mb-4">CPU load per node — sample chart</p>
-          <ResponsiveContainer width="100%" height={160}>
-            <BarChart data={cpuData} layout="vertical">
-              <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 11 }} unit="%" />
-              <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={70} />
-              <Tooltip formatter={(v) => `${v}%`} />
-              <Bar dataKey="cpu" fill="#1D9E75" radius={[0, 4, 4, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
+      </main>
     </div>
   );
 }
-

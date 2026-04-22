@@ -32,6 +32,7 @@ services:
       RABBITMQ_PASS: nexuspass
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      ML_SERVICE_URL: http://ml-service:8001
     volumes:
       - ./api:/app
     depends_on:
@@ -41,15 +42,49 @@ services:
 
   worker:
     build: ./worker
+    container_name: harvest-worker
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USER: nexus
       RABBITMQ_PASS: nexuspass
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      ML_SERVICE_URL: http://ml-service:8001
     depends_on:
       - rabbitmq
       - redis
+    restart: unless-stopped
+
+  ml-service:
+    build: ./ml_service
+    container_name: harvest-ml-service
+    ports:
+      - "8001:8001"
+    environment:
+      ADNE_DATASET_PATH: /institution_subnets
+      ADNE_FREQ: 1_day
+      ADNE_TARGET_COL: n_flows
+    volumes:
+      # Code expects these at /.. relative to /app/main.py
+      - ./institution_subnets:/institution_subnets
+      - ./times:/times
+    restart: unless-stopped
+
+  emitter:
+    build: 
+      context: ./emitter
+      dockerfile: ../worker/Dockerfile
+    container_name: harvest-emitter
+    command: python emitter.py
+    environment:
+      API_URL: http://api:8000/ingest
+      SCENARIO_URL: http://api:8000/scenario
+      DATA_FOLDER: /institution_subnets/agg_1_day
+    volumes:
+      - ./emitter:/app
+      - ./institution_subnets:/institution_subnets
+    depends_on:
+      - api
     restart: unless-stopped
 
 volumes:
