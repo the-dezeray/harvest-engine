@@ -5,6 +5,7 @@ from datetime import datetime
 import uuid
 import json
 import os
+import subprocess
 import pika
 import redis
 import httpx
@@ -43,6 +44,12 @@ ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://ml-service:8001")
 REDIS_BUILDING_COUNTS_KEY = os.getenv("BUILDING_COUNTS_KEY", "building_counts")
 REDIS_TOTAL_PROCESSED_KEY = os.getenv("TOTAL_PROCESSED_KEY", "total_processed")
 REDIS_ALERTS_KEY = os.getenv("ALERTS_KEY", "alerts")
+LIVE_TO_TARGET_SCALE = float(os.getenv("LIVE_TO_TARGET_SCALE", "800"))
+WORKER_MAX_COUNT = int(os.getenv("WORKER_MAX_COUNT", "10"))
+COMPOSE_FILE_PATH = os.getenv(
+    "COMPOSE_FILE_PATH",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "docker-compose.yml")),
+)
 
 _redis_client = None
 
@@ -106,6 +113,49 @@ def send_to_queue(data: dict) -> dict:
     return message
 
 
+def _run_compose_command(args: list[str], timeout: int = 20) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["docker-compose", "-f", COMPOSE_FILE_PATH, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _parse_worker_count(stdout: str) -> int:
+    raw = stdout.strip()
+    if not raw:
+        return 0
+
+    parsed: list[dict] = []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            parsed = [item for item in data if isinstance(item, dict)]
+        elif isinstance(data, dict):
+            parsed = [data]
+    except json.JSONDecodeError:
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+                if isinstance(item, dict):
+                    parsed.append(item)
+            except json.JSONDecodeError:
+                continue
+
+    count = 0
+    for item in parsed:
+        state = str(item.get("State", "")).lower()
+        service = item.get("Service")
+        if service == "worker" and state == "running":
+            count += 1
+    return count
+
+
 # health check
 @app.get("/")
 def home():
@@ -150,10 +200,59 @@ def set_scenario(mode: str):
     return {"mode": mode, "status": "updated"}
 
 
-# shows recent messages - good for debugging
+@app.get("/workers")
+def get_workers():
+    try:
+        ps_res = _run_compose_command(["ps", "worker", "--format", "json"])
+        if ps_res.returncode != 0:
+            return {
+                "status": "error",
+                "count": 0,
+                "error": (ps_res.stderr or "failed to read worker state").strip(),
+            }
+        return {
+            "status": "ok",
+            "count": _parse_worker_count(ps_res.stdout),
+            "max_count": WORKER_MAX_COUNT,
+        }
+    except Exception as ex:
+        return {"status": "error", "count": 0, "error": str(ex)}
+
+
+@app.post("/workers/scale")
+def scale_workers(count: int):
+    if count < 1:
+        return {"status": "error", "error": "count must be >= 1"}
+    if count > WORKER_MAX_COUNT:
+        return {"status": "error", "error": f"count must be <= {WORKER_MAX_COUNT}"}
+
+    try:
+        scale_res = _run_compose_command(
+            ["up", "-d", "--scale", f"worker={count}", "worker"],
+            timeout=60,
+        )
+        if scale_res.returncode != 0:
+            return {
+                "status": "error",
+                "error": (scale_res.stderr or "scale command failed").strip(),
+            }
+
+        ps_res = _run_compose_command(["ps", "worker", "--format", "json"])
+        current_count = _parse_worker_count(ps_res.stdout) if ps_res.returncode == 0 else count
+        return {"status": "scaled", "count": current_count, "requested_count": count}
+    except Exception as ex:
+        return {"status": "error", "error": str(ex)}
+
+
+# shows recent/all messages - good for debugging
 @app.get("/messages")
-def get_messages():
-    recent = list(reversed(received_messages[-20:]))
+def get_messages(limit: int | None = None):
+    if limit is not None and limit < 1:
+        limit = 1
+    if limit is not None and limit > 300:
+        limit = 300
+
+    recent = list(reversed(received_messages if limit is None else received_messages[-limit:]))
     return {"count": len(recent), "messages": recent}
 
 
@@ -187,12 +286,15 @@ async def get_ml_stats():
 
 
 @app.get("/alerts")
-def get_alerts(limit: int = 50):
-    if limit < 1: limit = 1
-    if limit > 200: limit = 200
+def get_alerts(limit: int | None = None):
+    if limit is not None and limit < 1:
+        limit = 1
+    if limit is not None and limit > 200:
+        limit = 200
     try:
         r = get_redis_client()
-        raw = r.lrange(REDIS_ALERTS_KEY, 0, limit - 1)
+        # No limit means return the full live alert stream.
+        raw = r.lrange(REDIS_ALERTS_KEY, 0, -1) if limit is None else r.lrange(REDIS_ALERTS_KEY, 0, limit - 1)
         alerts = [json.loads(item) for item in raw]
         return {"count": len(alerts), "alerts": alerts}
     except Exception:
@@ -212,6 +314,13 @@ def status():
             "by_building": by_building,
             "scenario": scenario["mode"],
             "source": "redis",
+            "live_to_target_scale": LIVE_TO_TARGET_SCALE,
         }
     except Exception:
-        return {"total_processed": len(received_messages), "by_building": {}, "scenario": "error", "source": "memory"}
+        return {
+            "total_processed": len(received_messages),
+            "by_building": {},
+            "scenario": "error",
+            "source": "memory",
+            "live_to_target_scale": LIVE_TO_TARGET_SCALE,
+        }

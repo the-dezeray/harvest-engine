@@ -33,8 +33,14 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       ML_SERVICE_URL: http://ml-service:8001
+      # Worker scale controls rely on docker-compose + host docker socket.
+      COMPOSE_FILE_PATH: /workspace/docker-compose.yml
+      WORKER_MAX_COUNT: "10"
+      LIVE_TO_TARGET_SCALE: "800"
     volumes:
       - ./api:/app
+      - ./:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - rabbitmq
       - redis
@@ -42,7 +48,6 @@ services:
 
   worker:
     build: ./worker
-    container_name: harvest-worker
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USER: nexus
@@ -50,6 +55,8 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       ML_SERVICE_URL: http://ml-service:8001
+      ADNE_FREQ: 1_day
+      LIVE_TO_TARGET_SCALE: "2000"
     depends_on:
       - rabbitmq
       - redis

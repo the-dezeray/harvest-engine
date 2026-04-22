@@ -19,6 +19,14 @@ ALERTS_KEY = os.getenv("ALERTS_KEY", "alerts")
 APS_SET_KEY = os.getenv("APS_SET_KEY", "aps")
 BUILDING_COUNTS_KEY = os.getenv("BUILDING_COUNTS_KEY", "building_counts")
 TOTAL_PROCESSED_KEY = os.getenv("TOTAL_PROCESSED_KEY", "total_processed")
+ADNE_FREQ = os.getenv("ADNE_FREQ", "1_day")
+LIVE_TO_TARGET_SCALE = float(os.getenv("LIVE_TO_TARGET_SCALE", "800"))
+
+FREQ_TO_SECONDS = {
+    "10_minutes": 10 * 60,
+    "1_hour": 60 * 60,
+    "1_day": 24 * 60 * 60,
+}
 
 def redis_client():
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
@@ -26,6 +34,12 @@ def redis_client():
 def push_alert(r, alert):
     r.lpush(ALERTS_KEY, json.dumps(alert))
     r.ltrim(ALERTS_KEY, 0, 99)
+
+
+def _seconds_for_freq(freq: str | None) -> int:
+    if not freq:
+        return FREQ_TO_SECONDS[ADNE_FREQ] if ADNE_FREQ in FREQ_TO_SECONDS else FREQ_TO_SECONDS["1_day"]
+    return FREQ_TO_SECONDS.get(freq, FREQ_TO_SECONDS.get(ADNE_FREQ, FREQ_TO_SECONDS["1_day"]))
 
 def ml_anomaly_monitor(stop_event):
     """
@@ -42,32 +56,43 @@ def ml_anomaly_monitor(stop_event):
             time.sleep(10)
             total_later = int(r.get(TOTAL_PROCESSED_KEY) or 0)
             live_rate = (total_later - total_now) / 10.0 # messages per second
+            live_rate_scaled = live_rate * LIVE_TO_TARGET_SCALE
 
             # 2. Get forecast from ML service
             with httpx.Client() as client:
                 res = client.get(f"{ML_SERVICE_URL}/predict?periods=1", timeout=5)
-                forecast = res.json().get("forecast", [])
+                payload = res.json()
+                forecast = payload.get("forecast", [])
                 if forecast:
+                    freq = str(payload.get("meta", {}).get("freq", ADNE_FREQ))
+                    seconds_per_bucket = _seconds_for_freq(freq)
                     pred = forecast[0]
-                    upper = pred["yhat_upper"] / 86400.0 # normalized to per-second (for 1_day)
-                    lower = pred["yhat_lower"] / 86400.0
+                    upper = float(pred["yhat_upper"]) / float(seconds_per_bucket)
+                    lower = float(pred["yhat_lower"]) / float(seconds_per_bucket)
+
+                    print(
+                        "[orchestrator] rates "
+                        f"freq={freq} bucket_s={seconds_per_bucket} "
+                        f"live_raw={live_rate:.2f} live_scaled={live_rate_scaled:.2f} "
+                        f"lower={lower:.2f} upper={upper:.2f} scale={LIVE_TO_TARGET_SCALE:.2f}"
+                    )
                     
                     # 3. Detect anomaly
-                    if live_rate > upper * 1.2:
+                    if live_rate_scaled > upper * 1.2:
                         push_alert(r, {
                             "id": str(uuid.uuid4()),
                             "type": "PREDICTED_ANOMALY",
                             "severity": "warning",
                             "timestamp": time.time(),
-                            "message": f"Traffic ({live_rate:.1f} msg/s) exceeds ML upper bound ({upper:.1f})",
+                            "message": f"Traffic ({live_rate_scaled:.1f} scaled msg/s) exceeds ML upper bound ({upper:.1f})",
                         })
-                    elif live_rate < lower * 0.8 and live_rate > 0.05:
+                    elif live_rate_scaled < lower * 0.8 and live_rate_scaled > 0.05:
                         push_alert(r, {
                             "id": str(uuid.uuid4()),
                             "type": "PREDICTED_ANOMALY",
                             "severity": "critical",
                             "timestamp": time.time(),
-                            "message": f"Traffic ({live_rate:.1f} msg/s) dropped below ML lower bound ({lower:.1f})",
+                            "message": f"Traffic ({live_rate_scaled:.1f} scaled msg/s) dropped below ML lower bound ({lower:.1f})",
                         })
 
         except Exception as e:

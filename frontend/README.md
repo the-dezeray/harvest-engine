@@ -18,6 +18,21 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
+## Dashboard Environment Variables
+
+For RabbitMQ charts and worker controls, set these in your frontend environment:
+
+```bash
+NEXT_PUBLIC_API_BASE=http://localhost:8000
+NEXT_PUBLIC_RABBITMQ_API_BASE=http://localhost:15672/api
+NEXT_PUBLIC_RABBITMQ_USER=nexus
+NEXT_PUBLIC_RABBITMQ_PASS=nexuspass
+NEXT_PUBLIC_RABBITMQ_QUEUE=network-data
+NEXT_PUBLIC_WORKER_MAX_COUNT=10
+```
+
+These RabbitMQ credentials are exposed to the browser and should only be used for local/dev demos.
+
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
 ## Learn More
