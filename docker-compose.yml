@@ -70,7 +70,11 @@ services:
     environment:
       ADNE_DATASET_PATH: /institution_subnets
       ADNE_FREQ: 1_day
-      ADNE_TARGET_COL: n_flows
+      ADNE_TARGET_COL: n_bytes
+      ADNE_MODE: multiplicative
+      ADNE_CPS: "0.001"
+      ADNE_SPS: "20.0"
+      ADNE_CPR: "0.9"
     volumes:
       # Code expects these at /.. relative to /app/main.py
       - ./institution_subnets:/institution_subnets

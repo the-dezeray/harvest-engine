@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   Area,
   AreaChart,
@@ -278,6 +279,12 @@ export default function Dashboard() {
           <h1 className="text-lg font-bold tracking-tight">HARVEST ENGINE <span className="text-slate-400 font-normal">| Orchestrator</span></h1>
         </div>
         <div className="flex gap-4 items-center">
+          <Link
+            href="/ml-service"
+            className="px-3 py-2 text-xs font-bold uppercase rounded border border-slate-300 bg-white hover:bg-slate-50"
+          >
+            ML Service
+          </Link>
           {hasAnomaly && <span className="bg-red-100 text-red-700 px-3 py-1 rounded text-xs font-bold animate-bounce">ANOMALY DETECTED</span>}
           <div className="text-right">
             <p className="text-[10px] uppercase text-slate-400 font-bold leading-none">Scenario</p>
