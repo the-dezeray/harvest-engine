@@ -53,6 +53,7 @@ const RABBITMQ_USER = process.env.NEXT_PUBLIC_RABBITMQ_USER ?? "nexus";
 const RABBITMQ_PASS = process.env.NEXT_PUBLIC_RABBITMQ_PASS ?? "nexuspass";
 const RABBITMQ_QUEUE = process.env.NEXT_PUBLIC_RABBITMQ_QUEUE ?? "network-data";
 const WORKER_MAX_COUNT = Number(process.env.NEXT_PUBLIC_WORKER_MAX_COUNT ?? "10");
+const DEFAULT_LIVE_TO_TARGET_SCALE = 100000; // Default if API doesn't provide it
 
 type RabbitOverview = {
   object_totals?: {
@@ -116,7 +117,7 @@ export default function Dashboard() {
         setStatus(data);
         
         if (lastTotal > 0) {
-          const scale = Number(data.live_to_target_scale ?? 100);
+          const scale = Number(data.live_to_target_scale ?? DEFAULT_LIVE_TO_TARGET_SCALE);
           const rate = ((data.total_processed - lastTotal) / 2) * scale; // scaled per second
           setHistory(prev => [...prev.slice(-29), { t: new Date().toLocaleTimeString(), val: rate }]);
         }
@@ -215,7 +216,8 @@ export default function Dashboard() {
     return history.map((h, i) => ({
       name: h.t,
       live: h.val,
-      // Convert forecast bucket totals to per-second to match live throughput.
+      // Forecast is already at institutional scale (n_flows from CESNET data)
+      // Just convert from per-bucket to per-second
       predicted: point ? point.yhat / secondsPerBucket : null,
       upper: point ? point.yhat_upper / secondsPerBucket : null,
       lower: point ? point.yhat_lower / secondsPerBucket : null,
@@ -339,7 +341,7 @@ export default function Dashboard() {
             </div>
             
             <div className="h-[240px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" minWidth={300} minHeight={240}>
                 <AreaChart data={chartData}>
                   <defs>
                     <linearGradient id="colorLive" x1="0" y1="0" x2="0" y2="1">
@@ -418,7 +420,7 @@ export default function Dashboard() {
               </div>
             </div>
             <div className="h-[140px] mt-4">
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" minWidth={200} minHeight={140}>
                 <LineChart data={rabbitRates}>
                   <XAxis dataKey="t" hide />
                   <YAxis fontSize={10} axisLine={false} tickLine={false} />

@@ -34,7 +34,7 @@ def evaluate_refined(history, mode, cps, sps, cpr, holidays):
 def main():
     holidays = load_holidays()
     dataset = "institution_subnets"
-    freq = "1_hour"
+    freq = "1_day"
     target_col = "n_bytes"
     
     os.environ["ADNE_DATASET"] = dataset

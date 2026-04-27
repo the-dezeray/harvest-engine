@@ -69,6 +69,24 @@ INSTITUTIONS_CONFIG: dict[str, DatasetConfig] = {
     ),
 }
 
+INSTITUTION_SUBNETS_CONFIG: dict[str, DatasetConfig] = {
+    "1_hour": DatasetConfig(
+        agg_dir=os.path.join(WorkspaceRoot, "institution_subnets", "agg_1_hour"),
+        times_csv=os.path.join(WorkspaceRoot, "times", "times_1_hour.csv"),
+        pandas_freq="h",
+    ),
+    "10_minutes": DatasetConfig(
+        agg_dir=os.path.join(WorkspaceRoot, "institution_subnets", "agg_10_minutes"),
+        times_csv=os.path.join(WorkspaceRoot, "times", "times_10_minutes.csv"),
+        pandas_freq="10min",
+    ),
+    "1_day": DatasetConfig(
+        agg_dir=os.path.join(WorkspaceRoot, "institution_subnets", "agg_1_day"),
+        times_csv=os.path.join(WorkspaceRoot, "times", "times_1_day.csv"),
+        pandas_freq="D",
+    ),
+}
+
 # Select dataset config based on environment variable
 def get_freq_config() -> dict[str, DatasetConfig]:
     dataset_path = os.getenv("ADNE_DATASET_PATH")
@@ -91,9 +109,19 @@ def get_freq_config() -> dict[str, DatasetConfig]:
             ),
         }
 
-    default_dataset = "institutions" if os.path.isdir(os.path.join(WorkspaceRoot, "institutions")) else "ip_addresses_sample"
+    # Auto-detect which dataset folder exists
+    if os.path.isdir(os.path.join(WorkspaceRoot, "institution_subnets")):
+        default_dataset = "institution_subnets"
+    elif os.path.isdir(os.path.join(WorkspaceRoot, "institutions")):
+        default_dataset = "institutions"
+    else:
+        default_dataset = "ip_addresses_sample"
+    
     dataset = os.getenv("ADNE_DATASET", default_dataset).lower()
-    if dataset == "institutions":
+    
+    if dataset == "institution_subnets":
+        return INSTITUTION_SUBNETS_CONFIG
+    elif dataset == "institutions":
         return INSTITUTIONS_CONFIG
     return IP_ADDRESSES_CONFIG
 

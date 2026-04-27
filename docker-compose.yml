@@ -36,7 +36,7 @@ services:
       # Worker scale controls rely on docker-compose + host docker socket.
       COMPOSE_FILE_PATH: /workspace/docker-compose.yml
       WORKER_MAX_COUNT: "10"
-      LIVE_TO_TARGET_SCALE: "800"
+      LIVE_TO_TARGET_SCALE: "100000"
     volumes:
       - ./api:/app
       - ./:/workspace
@@ -55,8 +55,8 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       ML_SERVICE_URL: http://ml-service:8001
-      ADNE_FREQ: 1_day
-      LIVE_TO_TARGET_SCALE: "2000"
+      ADNE_FREQ: 10_minutes
+      LIVE_TO_TARGET_SCALE: "100000"
     depends_on:
       - rabbitmq
       - redis
@@ -69,7 +69,7 @@ services:
       - "8001:8001"
     environment:
       ADNE_DATASET_PATH: /institution_subnets
-      ADNE_FREQ: 1_day
+      ADNE_FREQ: 10_minutes
       ADNE_TARGET_COL: n_bytes
       ADNE_MODE: multiplicative
       ADNE_CPS: "0.001"
